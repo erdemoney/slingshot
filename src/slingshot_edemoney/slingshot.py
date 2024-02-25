@@ -21,8 +21,8 @@ auto copy ssh id
 interpreter config updates
 """
 
-CONFIG_LOCATIONS = [f"{str(Path.home())}/.config/remote_interp.json",
-                    f"{str(Path.home())}/.remote_interp.json"]
+CONFIG_LOCATIONS = [f"{str(Path.home())}/.config/slingshot.json",
+                    f"{str(Path.home())}/.slingshot.json"]
 DEFAULT_CONFIG = {
     "interpreter": "python3",
     "project_roots": [],
@@ -58,14 +58,14 @@ def write_config(config_file_path: str, config: dict):
 
 def update_config(runtime_config: dict, config: dict, args, remote_host: str, local_source_file_path: str) -> dict:
     try:
-        script_cfg = config["script_cfg"][str(local_source_file_path)]
-    except KeyError:
-        script_cfg = {}
-
-    try:
-        host_cfg = config["host_cfg"][remote_host]
+        host_cfg = config["script_cfg"][remote_host]
     except KeyError:
         host_cfg = {}
+
+    try:
+        script_cfg = config["script_cfg"][remote_host]["scripts"][str(local_source_file_path)]
+    except KeyError:
+        script_cfg = {}
 
     runtime_config = runtime_config | host_cfg | script_cfg
 
@@ -75,13 +75,25 @@ def update_config(runtime_config: dict, config: dict, args, remote_host: str, lo
         runtime_config["prompt"] = args.prompt
     if args.args:
         runtime_config["args"] = args.args
+    if args.interpreter:
+        runtime_config["interpreter"] = args.interpreter
     if args.edit_args:
         edit_args(runtime_config)
 
-    config["script_cfg"][str(local_source_file_path)]["args"] = runtime_config["args"]
+    cur = config
+    for key in ["script_cfg", remote_host, "scripts", str(local_source_file_path)]:
+        if key not in cur:
+            cur[key] = {}
+        cur = cur[key]
 
-    if runtime_config["auto_add_hosts"] and remote_host not in config["host_cfg"]:
-        config["host_cfg"][remote_host] = {}
+    if "args" in runtime_config:
+        config["script_cfg"][remote_host]["scripts"][str(local_source_file_path)]["args"] = runtime_config["args"]
+
+    if "interpreter" in runtime_config:
+        config["script_cfg"][remote_host]["scripts"][str(local_source_file_path)]["interpreter"] = runtime_config["interpreter"]
+
+    if runtime_config["auto_add_hosts"] and remote_host not in config["script_cfg"]:
+        config["script_cfg"][remote_host] = {}
 
     return runtime_config
 
@@ -105,26 +117,26 @@ def select_remote_host(hosts: list[str]) -> str:
 def sync_project_to_remote(remote_host: str,
                            local_project_root: Path,
                            remote_project_root: Path,
-                           config: dict):
-    if config["verbose"] and "--verbose" not in config["rsync_options"] and "-v" not in config["rsync_options"]:
-        config["rsync_options"].append("--verbose")
+                           runtime_config: dict):
+    if runtime_config["verbose"] and "--verbose" not in runtime_config["rsync_options"] and "-v" not in runtime_config["rsync_options"]:
+        runtime_config["rsync_options"].append("--verbose")
 
     sysrsync.run(source=str(local_project_root),
                  destination=str(remote_project_root),
                  destination_ssh=remote_host,
-                 options=config["rsync_options"],
+                 options=runtime_config["rsync_options"],
                  sync_source_contents=False)
 
 
 def edit_args(config: dict):
-    config["args"] = prompt("args: ", default=config["args"])
+    config["args"] = prompt("args: ", default=config["args"] if "args" in config else "")
 
 
-def execute_on_remote(remote_source_file_path: str, remote_host: str, config: dict):
+def execute_on_remote(remote_source_file_path: str, remote_host: str, runtime_config: dict):
     return pty.spawn(["ssh", "-tt", remote_host,
                       "cd", remote_source_file_path.parent,
                       "&&",
-                      config["interpreter"], str(remote_source_file_path), config["args"]])
+                      runtime_config["interpreter"], str(remote_source_file_path), runtime_config["args"] if "args" in runtime_config else ""])
 
 
 def get_remote_path(local_source_file_path: Path, local_project_root: Path, remote_base_dir: str) -> Path:
@@ -142,6 +154,9 @@ def get_args():
     parser.add_argument("-a", "--args",
                         default=None,
                         help="command line args to execute script with")
+    parser.add_argument("-i", "--interpreter",
+                        default=None,
+                        help="interpreter to execute script with")
     parser.add_argument("-e", "--edit_args",
                         action="store_true",
                         help="edit command line args")
@@ -168,7 +183,7 @@ def main():
     if args.remote_host is not None:
         remote_host = args.remote_host
     elif args.prompt is not None:
-        remote_host = select_remote_host(config["host_cfg"])
+        remote_host = select_remote_host(config["script_cfg"])
     else:
         remote_host = config["mru_interpreter"]
 
@@ -189,7 +204,7 @@ def main():
     sync_project_to_remote(remote_host=remote_host,
                            local_project_root=local_project_root,
                            remote_project_root=remote_project_root,
-                           config=runtime_config)
+                           runtime_config=runtime_config)
 
     remote_source_file_path = get_remote_path(local_project_root=local_project_root,
                                               local_source_file_path=local_source_file_path,
@@ -197,7 +212,7 @@ def main():
 
     execute_on_remote(remote_source_file_path=remote_source_file_path,
                       remote_host=remote_host,
-                      config=runtime_config)
+                      runtime_config=runtime_config)
 
 
 if __name__ == "__main__":
